@@ -3,3 +3,4 @@ pydantic
 pdfplumber
 Pillow
 uvicorn
+python-multipart
