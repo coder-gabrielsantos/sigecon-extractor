@@ -1,13 +1,15 @@
-from typing import List, Dict, Any, Optional, Tuple
-import io, re
-import pdfplumber
+from typing import List, Dict, Any, Tuple
+import io
+import re
+
+from openpyxl import load_workbook
 
 # --- Regex / sets auxiliares ---
 CURRENCY_RX = re.compile(r"R\$\s*")
 SPACES_RX = re.compile(r"\s+")
 INT_RX = re.compile(r"^\d{1,4}$")
 
-# Aceita UNIDADES comuns (usada apenas para validação leve; não inferimos da descrição)
+# Aceita UNIDADES comuns (usada apenas para validação leve)
 UNIT_SET = {
     "UN", "CJ", "UM", "M", "BAR", "TUB", "CX", "KIT", "PAR", "PÇ", "PC", "JG",
     "KG", "LT", "L", "G", "MM", "CM", "MT", "ROL", "SAC", "FD", "SC", "TB", "BL", "CONJ"
@@ -20,14 +22,23 @@ HEADER_ALIASES = {
     "DESCRIÇÃO": {"DESCRIÇÃO", "DESCRICAO", "DESCRIÇÃO/ESPECIFICAÇÃO", "DESCRIÇÃO DO ITEM"},
     "UNID.": {"UNID.", "UNIDADE", "UND", "UNID"},
     "QUANT.": {"QUANT.", "QTD", "QUANTIDADE"},
-    "VALOR UNIT.": {"VALOR UNIT.", "VALOR UNITARIO", "VALOR UNITÁRIO", "VLR UNIT.", "PREÇO UNIT.", "PREÇO UNIT"},
+    "VALOR UNIT.": {
+        "VALOR UNIT.",
+        "VALOR UNITARIO",
+        "VALOR UNITÁRIO",
+        "VLR UNIT.",
+        "PREÇO UNIT.",
+        "PREÇO UNIT",
+    },
     "VALOR TOTAL": {"VALOR TOTAL", "VLR TOTAL", "TOTAL", "PREÇO TOTAL"},
 }
 
-INCH_VARIANTS = ['"', '\"', '”', '“', '″']
+INCH_VARIANTS = ['"', '\\"', "”", "“", "″"]
 INCH_GLYPH = "″"
 
-VALOR_TOTAL_SUFFIX_RX = re.compile(r"(VALOR\s+TOTAL\s*R\$\s*[\d\.\,]+)$", flags=re.IGNORECASE)
+VALOR_TOTAL_SUFFIX_RX = re.compile(
+    r"(VALOR\s+TOTAL\s*R\$\s*[\d\.\,]+)$", flags=re.IGNORECASE
+)
 VALOR_PRECO_TRAILING_RX = re.compile(r"(R\$\s*[\d\.\,]+)$", flags=re.IGNORECASE)
 
 
@@ -37,8 +48,14 @@ def normalize_inches(text: str) -> str:
         return text
     for v in INCH_VARIANTS:
         text = text.replace(v, '"')
+    # remove espaço antes de "
     text = re.sub(r"\s+\"", "\"", text)
-    text = re.sub(r"(\d+(?:[\.,]\d+)?(?:/\d+(?:[\.,]\d+)?)?)\"", r"\1" + INCH_GLYPH, text)
+    # transforma 100" em 100″
+    text = re.sub(
+        r"(\d+(?:[\.,]\d+)?(?:/\d+(?:[\.,]\d+)?)?)\"",
+        r"\1" + INCH_GLYPH,
+        text,
+    )
     text = text.replace('"', INCH_GLYPH)
     return text
 
@@ -51,7 +68,7 @@ def strip_valor_total_from_desc(text: str) -> str:
     return text
 
 
-def normalize_text(s: Optional[str]) -> str:
+def normalize_text(s: str) -> str:
     if s is None:
         return ""
     s = s.replace("\xa0", " ")
@@ -60,7 +77,7 @@ def normalize_text(s: Optional[str]) -> str:
     return s
 
 
-def parse_money(s: str) -> Optional[float]:
+def parse_money(s: str):
     if not s:
         return None
     s = normalize_text(s)
@@ -75,7 +92,7 @@ def parse_money(s: str) -> Optional[float]:
         return None
 
 
-def parse_int(s: str) -> Optional[int]:
+def parse_int(s: str):
     s = normalize_text(s)
     try:
         return int(s) if INT_RX.match(s) else None
@@ -90,9 +107,6 @@ def looks_like_total_row(row: List[str]) -> bool:
 
 # -------------------- Mapeamento de Cabeçalho --------------------
 def _header_match_score(cell: str, target_key: str) -> int:
-    """
-    Retorna 1 se a célula bate em algum alias do target_key, caso contrário 0.
-    """
     cell_u = normalize_text(cell).upper()
     for alias in HEADER_ALIASES[target_key]:
         if alias in cell_u:
@@ -102,8 +116,8 @@ def _header_match_score(cell: str, target_key: str) -> int:
 
 def detect_header_and_map(rows: List[List[str]]) -> Tuple[int, Dict[str, int]]:
     """
-    Encontra o índice da linha de cabeçalho e mapeia os índices de coluna para as chaves canônicas.
-    Retorna (header_index, col_map). Lança ValueError se não encontrar algo minimamente válido.
+    Encontra a linha de cabeçalho e mapeia as colunas para:
+    ITEM, DESCRIÇÃO, UNID., QUANT., VALOR UNIT., VALOR TOTAL.
     """
     best_idx = -1
     best_score = -1
@@ -117,7 +131,9 @@ def detect_header_and_map(rows: List[List[str]]) -> Tuple[int, Dict[str, int]]:
             best_idx = i
 
     if best_idx < 0 or best_score < 4:
-        raise ValueError("Cabeçalho da tabela não foi encontrado com confiança suficiente.")
+        raise ValueError(
+            "Cabeçalho da tabela não foi encontrado com confiança suficiente."
+        )
 
     header_row = rows[best_idx]
     col_map: Dict[str, int] = {}
@@ -126,7 +142,6 @@ def detect_header_and_map(rows: List[List[str]]) -> Tuple[int, Dict[str, int]]:
         if idx is not None:
             col_map[key] = idx
 
-    # Exigimos as 6 colunas canônicas
     missing = [k for k in CANON_KEYS if k not in col_map]
     if missing:
         raise ValueError(f"Não foi possível mapear todas as colunas: faltam {missing}")
@@ -134,10 +149,7 @@ def detect_header_and_map(rows: List[List[str]]) -> Tuple[int, Dict[str, int]]:
     return best_idx, col_map
 
 
-def _find_col_index(header_row: List[str], key: str) -> Optional[int]:
-    """
-    Procura o índice da coluna cujo texto casa com algum alias do 'key'.
-    """
+def _find_col_index(header_row: List[str], key: str):
     for j, cell in enumerate(header_row):
         cell_u = normalize_text(cell).upper()
         for alias in HEADER_ALIASES[key]:
@@ -146,25 +158,23 @@ def _find_col_index(header_row: List[str], key: str) -> Optional[int]:
     return None
 
 
-# -------------------- Parsing de Linhas baseadas no mapeamento --------------------
-def parse_row_with_map(row: List[str], col_map: Dict[str, int]) -> Dict[str, Any]:
-    """
-    Extrai campos exclusivamente pelas colunas mapeadas.
-    NÃO infere unidade via descrição. Não força UN. Apenas normaliza e valida.
-    """
-    get = lambda key: normalize_text(row[col_map[key]]) if col_map[key] < len(row) else ""
+# -------------------- Parsing de Linhas --------------------
+def parse_row_with_map(row: List[str], col_map: Dict[str, Any]) -> Dict[str, Any]:
+    get = (
+        lambda key: normalize_text(row[col_map[key]])
+        if col_map[key] < len(row)
+        else ""
+    )
 
     item = parse_int(get("ITEM"))
     descricao = strip_valor_total_from_desc(get("DESCRIÇÃO"))
     unid_raw = normalize_text(get("UNID.")).upper()
-    # Limpa pontuação/resíduos triviais na unidade (ex.: "UN." -> "UN")
     unid = unid_raw.rstrip(".,")
-
     quant = parse_int(get("QUANT."))
     valor_unit = parse_money(get("VALOR UNIT."))
     valor_total = parse_money(get("VALOR TOTAL"))
 
-    rec = {
+    return {
         "item": item,
         "descricao": descricao,
         "unid": unid,
@@ -172,33 +182,23 @@ def parse_row_with_map(row: List[str], col_map: Dict[str, int]) -> Dict[str, Any
         "valor_unit": valor_unit,
         "valor_total": valor_total,
     }
-    return rec
 
 
 def validate_and_fix(rec: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Valida consistência básica de valores. NÃO altera 'unid' por inferência textual.
-    Completa valor_total a partir de valor_unit * quant quando aplicável.
-    """
     vu = rec.get("valor_unit")
     vt = rec.get("valor_total")
     qt = rec.get("quant")
 
-    # Recalcula total se unitário e quantidade estiverem presentes
+    # recalcula valor_total se possível
     if vu is not None and qt is not None:
         calc = round(vu * qt, 2)
-        # Se vt ausente ou muito próximo do calculado, substitui
         if vt is None or abs(calc - vt) <= 0.05:
             rec["valor_total"] = calc
 
     return rec
 
 
-def build_issues(rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Reporta campos essenciais ausentes. Não marca 'unidade fora do set' como erro fatal,
-    apenas informa se for útil.
-    """
+def build_issues(rec: Dict[str, Any]):
     missing = []
     for k in ["item", "descricao", "unid", "quant", "valor_unit", "valor_total"]:
         v = rec.get(k)
@@ -206,59 +206,46 @@ def build_issues(rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             missing.append(k)
 
     if not missing:
-        # Sinalização leve: unidade inesperada (não bloqueia)
         unid = (rec.get("unid") or "").upper()
         if unid and unid not in UNIT_SET:
             return {
                 "item": rec.get("item"),
                 "warning": f"Unidade '{unid}' fora da lista conhecida",
-                "row": {k: rec.get(k) for k in ["descricao", "unid", "quant", "valor_unit", "valor_total"]},
+                "row": {
+                    k: rec.get(k)
+                    for k in ["descricao", "unid", "quant", "valor_unit", "valor_total"]
+                },
             }
         return None
 
     return {
         "item": rec.get("item"),
         "missing": missing,
-        "row": {k: rec.get(k) for k in ["descricao", "unid", "quant", "valor_unit", "valor_total"]},
+        "row": {k: rec.get(k) for k in ["descricao", "unid", "valor_unit", "valor_total"]},
     }
 
 
-# -------------------- Função principal --------------------
-def extract_table_from_pdf(file_bytes: bytes) -> Dict[str, Any]:
+# -------------------- Funções principais --------------------
+def _extract_from_all_rows(
+    all_rows: List[List[str]], empty_msg: str
+) -> Dict[str, Any]:
     """
-    Lê o PDF, detecta o cabeçalho, mapeia as colunas e extrai os registros APENAS pelas colunas.
-    Sem inferência por descrição. Sem fallback de unidade para 'UN'.
+    Lógica comum: recebe todas as linhas da planilha e devolve:
+    { "rows": [...], "issues": [...] }
     """
-    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        all_rows: List[List[str]] = []
-        for page in pdf.pages:
-            tables = page.extract_tables(table_settings={
-                "vertical_strategy": "lines",
-                "horizontal_strategy": "lines",
-                "intersection_tolerance": 5,
-                "snap_tolerance": 3,
-                "join_tolerance": 3,
-                "edge_min_length": 20,
-            }) or []
-            for tb in tables:
-                for raw_row in tb:
-                    row = [normalize_text(c) for c in (raw_row or [])]
-                    if any(cell for cell in row):
-                        all_rows.append(row)
-
     if not all_rows:
-        return {"rows": [], "issues": [{"error": "Nenhuma tabela encontrada no PDF."}]}
+        return {"rows": [], "issues": [{"error": empty_msg}]}
 
-    # Detecta cabeçalho e mapeamento
+    # Detecta cabeçalho e mapeia
     header_idx, col_map = detect_header_and_map(all_rows)
 
-    # Consome linhas de dados até o final ou até encontrar totalização
-    data_rows = []
-    for row in all_rows[header_idx + 1:]:
+    # Linhas de dados = abaixo do cabeçalho (não devolvemos o cabeçalho!)
+    data_rows: List[List[str]] = []
+    for row in all_rows[header_idx + 1 :]:
         if not row or not any(normalize_text(c) for c in row):
             continue
         if looks_like_total_row(row):
-            # Paramos ao encontrar a linha de totalização geral
+            # para quando encontrar totalização geral
             break
         data_rows.append(row)
 
@@ -266,12 +253,10 @@ def extract_table_from_pdf(file_bytes: bytes) -> Dict[str, Any]:
     issues: List[Dict[str, Any]] = []
 
     for row in data_rows:
-        # Garante comprimento mínimo para indexação segura
-        # (Se a tabela vier com células a menos em alguma linha)
         safe_row = list(row)
         max_idx = max(col_map.values())
         if len(safe_row) <= max_idx:
-            # Completa com strings vazias
+            # completa com strings vazias se a linha for curta
             safe_row = safe_row + [""] * (max_idx + 1 - len(safe_row))
 
         rec = parse_row_with_map(safe_row, col_map)
@@ -281,16 +266,51 @@ def extract_table_from_pdf(file_bytes: bytes) -> Dict[str, Any]:
         if issue:
             issues.append(issue)
 
-        records.append({
-            "item": rec.get("item"),
-            "descricao": rec.get("descricao") or "",
-            "unid": (rec.get("unid") or "").upper().rstrip(".,"),
-            "quant": rec.get("quant"),
-            "valor_unit": rec.get("valor_unit"),
-            "valor_total": rec.get("valor_total"),
-        })
+        records.append(
+            {
+                "item": rec.get("item"),
+                "descricao": rec.get("descricao") or "",
+                "unid": (rec.get("unid") or "").upper().rstrip(".,"),
+                "quant": rec.get("quant"),
+                "valor_unit": rec.get("valor_unit"),
+                "valor_total": rec.get("valor_total"),
+            }
+        )
 
     # Ordena por item (quando existir)
-    records.sort(key=lambda x: (x["item"] if x["item"] is not None else 10 ** 9,))
+    records.sort(key=lambda x: (x["item"] if x["item"] is not None else 10**9,))
 
     return {"rows": records, "issues": issues}
+
+
+def extract_table_from_xlsx(file_bytes: bytes) -> Dict[str, Any]:
+    """
+    Lê um arquivo XLSX, detecta o cabeçalho e extrai os campos
+    ITEM, DESCRIÇÃO, UNID., QUANT., VALOR UNIT., VALOR TOTAL.
+
+    Retorna NO MESMO FORMATO que o extrator antigo de PDF:
+    {
+      "rows": [...],
+      "issues": [...]
+    }
+    """
+    try:
+        wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
+    except Exception:
+        return {
+            "rows": [],
+            "issues": [{"error": "Não foi possível ler o arquivo XLSX."}],
+        }
+
+    sheet = wb.active
+
+    all_rows: List[List[str]] = []
+    for row in sheet.iter_rows(values_only=True):
+        raw_row = ["" if cell is None else str(cell) for cell in row]
+        norm_row = [normalize_text(c) for c in raw_row]
+        if any(norm_row):
+            all_rows.append(norm_row)
+
+    return _extract_from_all_rows(
+        all_rows, "Nenhuma tabela encontrada na planilha XLSX."
+    )

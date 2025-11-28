@@ -1,6 +1,5 @@
 fastapi
 pydantic
-pdfplumber
-Pillow
+openpyxl
 uvicorn
 python-multipart

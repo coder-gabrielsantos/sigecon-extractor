@@ -9,15 +9,18 @@ from fastapi.middleware.cors import CORSMiddleware
 # garante que o diretório desta função (api/) esteja no PYTHONPATH
 sys.path.append(os.path.dirname(__file__))
 
-from extractor import extract_table_from_pdf  # noqa: E402
+from extractor import extract_table_from_xlsx  # noqa: E402
 
 app = FastAPI(
-    title="Extrator de Tabela do PDF",
-    description="Extrai ITEM, DESCRIÇÃO, UNID., QUANT., VALOR UNIT., VALOR TOTAL de um PDF.",
-    version="1.2.1",
+    title="Extrator de Tabela do XLSX",
+    description=(
+        "Extrai ITEM, DESCRIÇÃO, UNID., QUANT., VALOR UNIT., VALOR TOTAL "
+        "de uma planilha XLSX."
+    ),
+    version="1.0.0",
 )
 
-# CORS liberado para qualquer origem (em produção, restringir)
+# CORS liberado para qualquer origem (ajuste se quiser restringir)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,62 +31,48 @@ app.add_middleware(
 
 
 @app.get("/")
-def root():
-    return {
-        "status": "ok",
-        "message": "Use POST /api/index/extract com campo 'file' para enviar o PDF.",
-        "endpoints": {
-            "health": "/api/index/health",
-            "extract": "/api/index/extract",
-        },
-    }
-
-
-@app.get("/health")
-def health():
-    return {"status": "healthy"}
+async def root():
+    return {"status": "ok", "message": "XLSX table extractor running"}
 
 
 @app.post("/extract")
-async def extract(file: UploadFile = File(...)):
-    # valida extensão
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are accepted")
+async def extract_table(file: UploadFile = File(...)):
+    """
+    Recebe um arquivo .xlsx e devolve um JSON no mesmo formato que o serviço antigo de PDF:
+
+    {
+      "rows": [
+        {
+          "item": int | null,
+          "descricao": str,
+          "unid": str,
+          "quant": int | null,
+          "valor_unit": float | null,
+          "valor_total": float | null
+        },
+        ...
+      ],
+      "issues": [...]
+    }
+    """
+    filename = file.filename or ""
+    if not filename.lower().endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
+        raise HTTPException(
+            status_code=400,
+            detail="Somente arquivos XLSX (Excel moderno) são aceitos.",
+        )
 
     try:
-        content = await file.read()
-        if not content:
-            raise HTTPException(status_code=400, detail="Empty file")
+        file_bytes = await file.read()
+        if not file_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail="Arquivo vazio.",
+            )
 
-        # chama o parser principal
-        result = extract_table_from_pdf(content)  # retorna {"rows": [...], "issues": [...]}
-        rows = result.get("rows", [])
-        issues = result.get("issues", [])
-
-        # métricas agregadas úteis pro SIGECON
-        total_itens = sum(1 for r in rows if r.get("item") is not None)
-        soma_total = round(sum((r.get("valor_total") or 0.0) for r in rows), 2)
-        soma_unitaria = round(sum((r.get("valor_unit") or 0.0) for r in rows), 2)
-
-        return JSONResponse(
-            {
-                "count": len(rows),
-                "count_com_item": total_itens,
-                "soma_valor_total": soma_total,
-                "soma_valor_unit": soma_unitaria,
-                "moeda": "BRL",
-                "columns": [
-                    "item",
-                    "descricao",
-                    "unid",
-                    "quant",
-                    "valor_unit",
-                    "valor_total",
-                ],
-                "rows": rows,
-                "issues": issues,
-            }
-        )
+        result = extract_table_from_xlsx(file_bytes)
+        # o extrator já remove o cabeçalho; só retorna as linhas de itens
+        return JSONResponse(content=result)
 
     except HTTPException:
         # repassa erros conhecidos
@@ -92,8 +81,8 @@ async def extract(file: UploadFile = File(...)):
         traceback_str = "".join(
             traceback.format_exception(type(e), e, e.__traceback__)
         )
-        print("ERROR_PROCESSING_PDF:", traceback_str)
+        print("ERROR_PROCESSING_XLSX:", traceback_str)
         raise HTTPException(
             status_code=500,
-            detail="Error processing PDF",
+            detail="Error processing XLSX",
         )
