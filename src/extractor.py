@@ -4,17 +4,10 @@ import re
 
 from openpyxl import load_workbook
 
-# --- Regex / sets auxiliares ---
+# --- Regex auxiliares ---
 CURRENCY_RX = re.compile(r"R\$\s*")
 SPACES_RX = re.compile(r"\s+")
 INT_RX = re.compile(r"^\d{1,4}$")
-
-# UNIDADES conhecidas (apenas para warnings leves, não é obrigatório bater)
-UNIT_SET = {
-    "UN", "CJ", "UM", "M", "BAR", "TUB", "CX", "KIT", "PAR", "PÇ", "PC", "JG",
-    "KG", "LT", "L", "G", "MM", "CM", "MT", "ROL", "SAC", "FD", "SC", "TB", "BL",
-    "CONJ", "BLOCO"
-}
 
 # Cabeçalhos canônicos e aliases
 CANON_KEYS = ["ITEM", "DESCRIÇÃO", "UNID.", "QUANT.", "VALOR UNIT.", "VALOR TOTAL"]
@@ -36,15 +29,15 @@ HEADER_ALIASES = {
         "VLR UNIT.",
         "PREÇO UNIT.",
         "PREÇO UNIT",
-        "V. UNIT.",   # usado na planilha do contrato
-        "V UNIT.",    # variação sem ponto
+        "V. UNIT.",  # usado na planilha
+        "V UNIT.",  # variação sem ponto
     },
     "VALOR TOTAL": {
         "VALOR TOTAL",
         "VLR TOTAL",
         "TOTAL",
         "PREÇO TOTAL",
-        "V. TOTAL",   # usado na planilha do contrato
+        "V. TOTAL",  # usado na planilha
         "V TOTAL",
     },
 }
@@ -185,7 +178,7 @@ def parse_row_with_map(row: List[str], col_map: Dict[str, Any]) -> Dict[str, Any
     item = parse_int(get("ITEM"))
     descricao = strip_valor_total_from_desc(get("DESCRIÇÃO"))
     unid_raw = normalize_text(get("UNID.")).upper()
-    unid = unid_raw.rstrip(".,")
+    unid = unid_raw.rstrip(".,")  # usa exatamente a unidade da coluna (só limpa pontinho)
     quant = parse_int(get("QUANT."))
     valor_unit = parse_money(get("VALOR UNIT."))
     valor_total = parse_money(get("VALOR TOTAL"))
@@ -215,6 +208,10 @@ def validate_and_fix(rec: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_issues(rec: Dict[str, Any]):
+    """
+    Apenas checa campos essenciais ausentes.
+    Não faz mais nenhuma validação de unidade.
+    """
     missing = []
     for k in ["item", "descricao", "unid", "quant", "valor_unit", "valor_total"]:
         v = rec.get(k)
@@ -222,16 +219,6 @@ def build_issues(rec: Dict[str, Any]):
             missing.append(k)
 
     if not missing:
-        unid = (rec.get("unid") or "").upper()
-        if unid and unid not in UNIT_SET:
-            return {
-                "item": rec.get("item"),
-                "warning": f"Unidade '{unid}' fora da lista conhecida",
-                "row": {
-                    k: rec.get(k)
-                    for k in ["descricao", "unid", "quant", "valor_unit", "valor_total"]
-                },
-            }
         return None
 
     return {
@@ -243,7 +230,7 @@ def build_issues(rec: Dict[str, Any]):
 
 # -------------------- Função comum de extração --------------------
 def _extract_from_all_rows(
-    all_rows: List[List[str]], empty_msg: str
+        all_rows: List[List[str]], empty_msg: str
 ) -> Dict[str, Any]:
     """
     Recebe todas as linhas da planilha (já como texto), detecta cabeçalho e
@@ -262,7 +249,7 @@ def _extract_from_all_rows(
 
     # Linhas de dados = abaixo do cabeçalho (não devolvemos o cabeçalho!)
     data_rows: List[List[str]] = []
-    for row in all_rows[header_idx + 1 :]:
+    for row in all_rows[header_idx + 1:]:
         if not row or not any(normalize_text(c) for c in row):
             continue
         if looks_like_total_row(row):
@@ -299,7 +286,7 @@ def _extract_from_all_rows(
         )
 
     # Ordena por item (quando existir)
-    records.sort(key=lambda x: (x["item"] if x["item"] is not None else 10**9,))
+    records.sort(key=lambda x: (x["item"] if x["item"] is not None else 10 ** 9,))
 
     return {"rows": records, "issues": issues}
 

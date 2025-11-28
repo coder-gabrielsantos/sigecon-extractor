@@ -6,7 +6,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-# garante que o diretório desta função (api/) esteja no PYTHONPATH
+# garante que o diretório desta função (src/) esteja no PYTHONPATH
 sys.path.append(os.path.dirname(__file__))
 
 from extractor import extract_table_from_xlsx  # noqa: E402
@@ -38,7 +38,7 @@ async def root():
 @app.post("/extract")
 async def extract_table(file: UploadFile = File(...)):
     """
-    Recebe um arquivo .xlsx e devolve um JSON no mesmo formato que o serviço antigo de PDF:
+    Recebe um arquivo .xlsx e devolve um JSON no formato:
 
     {
       "rows": [
@@ -71,7 +71,6 @@ async def extract_table(file: UploadFile = File(...)):
             )
 
         result = extract_table_from_xlsx(file_bytes)
-        # o extrator já remove o cabeçalho; só retorna as linhas de itens
         return JSONResponse(content=result)
 
     except HTTPException:
