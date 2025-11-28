@@ -9,17 +9,24 @@ CURRENCY_RX = re.compile(r"R\$\s*")
 SPACES_RX = re.compile(r"\s+")
 INT_RX = re.compile(r"^\d{1,4}$")
 
-# Aceita UNIDADES comuns (usada apenas para validação leve)
+# UNIDADES conhecidas (apenas para warnings leves, não é obrigatório bater)
 UNIT_SET = {
     "UN", "CJ", "UM", "M", "BAR", "TUB", "CX", "KIT", "PAR", "PÇ", "PC", "JG",
-    "KG", "LT", "L", "G", "MM", "CM", "MT", "ROL", "SAC", "FD", "SC", "TB", "BL", "CONJ"
+    "KG", "LT", "L", "G", "MM", "CM", "MT", "ROL", "SAC", "FD", "SC", "TB", "BL",
+    "CONJ", "BLOCO"
 }
 
 # Cabeçalhos canônicos e aliases
 CANON_KEYS = ["ITEM", "DESCRIÇÃO", "UNID.", "QUANT.", "VALOR UNIT.", "VALOR TOTAL"]
 HEADER_ALIASES = {
     "ITEM": {"ITEM", "ITEN", "ITENS"},
-    "DESCRIÇÃO": {"DESCRIÇÃO", "DESCRICAO", "DESCRIÇÃO/ESPECIFICAÇÃO", "DESCRIÇÃO DO ITEM"},
+    "DESCRIÇÃO": {
+        "DESCRIÇÃO",
+        "DESCRICAO",
+        "DESCRIÇÃO/ESPECIFICAÇÃO",
+        "DESCRIÇÃO DO ITEM",
+        "DESCRIÇAO",
+    },
     "UNID.": {"UNID.", "UNIDADE", "UND", "UNID"},
     "QUANT.": {"QUANT.", "QTD", "QUANTIDADE"},
     "VALOR UNIT.": {
@@ -29,8 +36,17 @@ HEADER_ALIASES = {
         "VLR UNIT.",
         "PREÇO UNIT.",
         "PREÇO UNIT",
+        "V. UNIT.",   # usado na planilha do contrato
+        "V UNIT.",    # variação sem ponto
     },
-    "VALOR TOTAL": {"VALOR TOTAL", "VLR TOTAL", "TOTAL", "PREÇO TOTAL"},
+    "VALOR TOTAL": {
+        "VALOR TOTAL",
+        "VLR TOTAL",
+        "TOTAL",
+        "PREÇO TOTAL",
+        "V. TOTAL",   # usado na planilha do contrato
+        "V TOTAL",
+    },
 }
 
 INCH_VARIANTS = ['"', '\\"', "”", "“", "″"]
@@ -114,6 +130,15 @@ def _header_match_score(cell: str, target_key: str) -> int:
     return 0
 
 
+def _find_col_index(header_row: List[str], key: str):
+    for j, cell in enumerate(header_row):
+        cell_u = normalize_text(cell).upper()
+        for alias in HEADER_ALIASES[key]:
+            if alias in cell_u:
+                return j
+    return None
+
+
 def detect_header_and_map(rows: List[List[str]]) -> Tuple[int, Dict[str, int]]:
     """
     Encontra a linha de cabeçalho e mapeia as colunas para:
@@ -147,15 +172,6 @@ def detect_header_and_map(rows: List[List[str]]) -> Tuple[int, Dict[str, int]]:
         raise ValueError(f"Não foi possível mapear todas as colunas: faltam {missing}")
 
     return best_idx, col_map
-
-
-def _find_col_index(header_row: List[str], key: str):
-    for j, cell in enumerate(header_row):
-        cell_u = normalize_text(cell).upper()
-        for alias in HEADER_ALIASES[key]:
-            if alias in cell_u:
-                return j
-    return None
 
 
 # -------------------- Parsing de Linhas --------------------
@@ -225,13 +241,18 @@ def build_issues(rec: Dict[str, Any]):
     }
 
 
-# -------------------- Funções principais --------------------
+# -------------------- Função comum de extração --------------------
 def _extract_from_all_rows(
     all_rows: List[List[str]], empty_msg: str
 ) -> Dict[str, Any]:
     """
-    Lógica comum: recebe todas as linhas da planilha e devolve:
-    { "rows": [...], "issues": [...] }
+    Recebe todas as linhas da planilha (já como texto), detecta cabeçalho e
+    devolve:
+
+    {
+      "rows": [...],
+      "issues": [...]
+    }
     """
     if not all_rows:
         return {"rows": [], "issues": [{"error": empty_msg}]}
@@ -283,6 +304,7 @@ def _extract_from_all_rows(
     return {"rows": records, "issues": issues}
 
 
+# -------------------- Função principal pública --------------------
 def extract_table_from_xlsx(file_bytes: bytes) -> Dict[str, Any]:
     """
     Lê um arquivo XLSX, detecta o cabeçalho e extrai os campos
@@ -302,6 +324,7 @@ def extract_table_from_xlsx(file_bytes: bytes) -> Dict[str, Any]:
             "issues": [{"error": "Não foi possível ler o arquivo XLSX."}],
         }
 
+    # usa a planilha ativa (no Google Sheets normalmente é a única)
     sheet = wb.active
 
     all_rows: List[List[str]] = []
