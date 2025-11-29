@@ -28,7 +28,7 @@ HEADER_ALIASES = {
         "VLR UNIT.",
         "PREÇO UNIT.",
         "PREÇO UNIT",
-        "V. UNIT.",  # usado na planilha
+        "V. UNIT.",   # usado na planilha
         "V UNIT.",
     },
     "VALOR TOTAL": {
@@ -36,7 +36,7 @@ HEADER_ALIASES = {
         "VLR TOTAL",
         "TOTAL",
         "PREÇO TOTAL",
-        "V. TOTAL",  # usado na planilha
+        "V. TOTAL",   # usado na planilha
         "V TOTAL",
     },
 }
@@ -65,6 +65,17 @@ def normalize_inches(text: str) -> str:
     return text.replace('"', INCH_GLYPH)
 
 
+def normalize_text(value) -> str:
+    """Normaliza qualquer coisa para string de forma segura (para texto/cabeçalho)."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    value = value.replace("\xa0", " ")
+    value = SPACES_RX.sub(" ", value).strip()
+    return normalize_inches(value)
+
+
 def strip_valor_total_from_desc(text: str) -> str:
     if not text:
         return text
@@ -73,28 +84,27 @@ def strip_valor_total_from_desc(text: str) -> str:
     return text
 
 
-def normalize_text(s: str) -> str:
-    if s is None:
-        return ""
-    s = s.replace("\xa0", " ")
-    s = SPACES_RX.sub(" ", s).strip()
-    return normalize_inches(s)
-
-
-def parse_money(s: str):
+def parse_money(value):
     """
     Converte valores monetários em float, aceitando:
-    - 'R$ 2.277,92'
-    - '2277,92'
-    - '49.52'
+    - 2.277,92
+    - 2277,92
+    - 49.52
+    - números já como int/float vindos do Excel
     """
+    if value is None:
+        return None
+
+    # Se já vier numérico do Excel, só converte
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    s = normalize_text(value)
     if not s:
         return None
 
-    s = normalize_text(s)
+    # remove "R$" e caracteres estranhos
     s = CURRENCY_RX.sub("", s).strip()
-
-    # mantém apenas dígitos, ponto, vírgula e sinal
     allowed = set("0123456789-.,")
     s = "".join(ch for ch in s if ch in allowed)
 
@@ -102,15 +112,15 @@ def parse_money(s: str):
         return None
 
     if "," in s and "." in s:
-        # formato BR: . milhar, , decimal -> remove pontos de milhar
+        # formato BR: . milhar, , decimal
         s = s.replace(".", "")
         s = s.replace(",", ".")
     elif "," in s:
-        # só vírgula: assume vírgula como decimal e ponto (se houver) como milhar
+        # só vírgula: assume vírgula decimal
         s = s.replace(".", "")
         s = s.replace(",", ".")
     else:
-        # só ponto ou nenhum separador: assume ponto decimal (não mexe)
+        # só ponto ou nenhum separador: já é formato padrão
         pass
 
     try:
@@ -119,11 +129,33 @@ def parse_money(s: str):
         return None
 
 
-# 🔥 função flexível para inteiros (item e quant)
-def parse_int_flex(s: str):
+def parse_int_flex(value):
+    """
+    Converte ITEM/QUANT em int:
+    - aceita int/float direto do Excel
+    - aceita strings tipo "180", "180.0", " 426 ", etc.
+    """
+    if value is None:
+        return None
+
+    # numérico direto
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(round(value))
+
+    s = normalize_text(value)
     if not s:
         return None
-    s = normalize_text(s)
+
+    # tenta via float primeiro (para "180.0" / "426,0")
+    try:
+        f = float(s.replace(",", "."))
+        return int(round(f))
+    except ValueError:
+        pass
+
+    # fallback: mantém só dígitos
     only_digits = NON_DIGIT_RX.sub("", s)
     if not only_digits:
         return None
@@ -133,18 +165,18 @@ def parse_int_flex(s: str):
         return None
 
 
-def looks_like_total_row(row: List[str]) -> bool:
+def looks_like_total_row(row: List) -> bool:
     joined = " ".join(normalize_text(c).upper() for c in row)
-    return ("VALOR TOTAL" in joined) and (parse_money(joined) is not None)
+    return "VALOR TOTAL" in joined and parse_money(joined) is not None
 
 
 # -------------------- Mapeamento --------------------
-def _header_match_score(cell: str, target_key: str) -> int:
+def _header_match_score(cell, target_key: str) -> int:
     cell_u = normalize_text(cell).upper()
     return int(any(alias in cell_u for alias in HEADER_ALIASES[target_key]))
 
 
-def _find_col_index(header_row: List[str], key: str):
+def _find_col_index(header_row: List, key: str):
     for j, cell in enumerate(header_row):
         cell_u = normalize_text(cell).upper()
         for alias in HEADER_ALIASES[key]:
@@ -153,7 +185,7 @@ def _find_col_index(header_row: List[str], key: str):
     return None
 
 
-def detect_header_and_map(rows: List[List[str]]) -> Tuple[int, Dict[str, int]]:
+def detect_header_and_map(rows: List[List]) -> Tuple[int, Dict[str, int]]:
     best_idx = -1
     best_score = -1
 
@@ -184,19 +216,24 @@ def detect_header_and_map(rows: List[List[str]]) -> Tuple[int, Dict[str, int]]:
 
 
 # -------------------- Parsing --------------------
-def parse_row_with_map(row: List[str], col_map: Dict[str, Any]) -> Dict[str, Any]:
-    def get(key: str) -> str:
+def parse_row_with_map(row: List, col_map: Dict[str, Any]) -> Dict[str, Any]:
+    def get_raw(key: str):
         idx = col_map[key]
-        if idx < len(row):
-            return normalize_text(row[idx])
-        return ""
+        return row[idx] if idx < len(row) else None
 
-    item = parse_int_flex(get("ITEM"))
-    descricao = strip_valor_total_from_desc(get("DESCRIÇÃO"))
-    unid = get("UNID.").upper().rstrip(".,")
-    quant = parse_int_flex(get("QUANT."))
-    valor_unit = parse_money(get("VALOR UNIT."))
-    valor_total = parse_money(get("VALOR TOTAL"))
+    raw_item = get_raw("ITEM")
+    raw_desc = get_raw("DESCRIÇÃO")
+    raw_unid = get_raw("UNID.")
+    raw_quant = get_raw("QUANT.")
+    raw_vu = get_raw("VALOR UNIT.")
+    raw_vt = get_raw("VALOR TOTAL")
+
+    item = parse_int_flex(raw_item)
+    descricao = strip_valor_total_from_desc(normalize_text(raw_desc))
+    unid = normalize_text(raw_unid).upper().rstrip(".,")
+    quant = parse_int_flex(raw_quant)
+    valor_unit = parse_money(raw_vu)
+    valor_total = parse_money(raw_vt)
 
     return {
         "item": item,
@@ -213,8 +250,7 @@ def validate_and_fix(rec: Dict[str, Any]):
     qt = rec.get("quant")
 
     if vu is not None and qt is not None:
-        calc = round(vu * qt, 2)
-        rec["valor_total"] = calc
+        rec["valor_total"] = round(vu * qt, 2)
 
     return rec
 
@@ -234,16 +270,18 @@ def build_issues(rec: Dict[str, Any]):
 
 
 # -------------------- Extração principal --------------------
-def _extract_from_all_rows(all_rows: List[List[str]], empty_msg: str):
+def _extract_from_all_rows(all_rows: List[List], empty_msg: str):
     if not all_rows:
         return {"rows": [], "issues": [{"error": empty_msg}]}
 
     header_idx, col_map = detect_header_and_map(all_rows)
 
-    data_rows: List[List[str]] = []
-    for row in all_rows[header_idx + 1:]:
+    data_rows: List[List] = []
+    for row in all_rows[header_idx + 1 :]:
+        # pula linha vazia
         if not row or not any(normalize_text(c) for c in row):
             continue
+        # para na linha de totalização
         if looks_like_total_row(row):
             break
         data_rows.append(row)
@@ -252,7 +290,7 @@ def _extract_from_all_rows(all_rows: List[List[str]], empty_msg: str):
     issues: List[Dict[str, Any]] = []
 
     for row in data_rows:
-        rec = parse_row_with_map(list(row), col_map)
+        rec = parse_row_with_map(row, col_map)
         rec = validate_and_fix(rec)
 
         issue = build_issues(rec)
@@ -261,7 +299,7 @@ def _extract_from_all_rows(all_rows: List[List[str]], empty_msg: str):
 
         records.append(rec)
 
-    records.sort(key=lambda r: (r["item"] if r["item"] is not None else 10 ** 9))
+    records.sort(key=lambda r: (r["item"] if r["item"] is not None else 10**9))
 
     return {"rows": records, "issues": issues}
 
@@ -277,11 +315,12 @@ def extract_table_from_xlsx(file_bytes: bytes):
 
     sheet = wb.active
 
-    all_rows: List[List[str]] = []
+    all_rows: List[List] = []
     for row in sheet.iter_rows(values_only=True):
-        raw = ["" if c is None else str(c) for c in row]
-        norm = [normalize_text(c) for c in raw]
-        if any(norm):
-            all_rows.append(norm)
+        raw_row = list(row)
+        # normaliza para ver se é vazia, mas guarda tipos originais
+        norm_row = [normalize_text(c) for c in raw_row]
+        if any(norm_row):
+            all_rows.append(raw_row)
 
     return _extract_from_all_rows(all_rows, "Nenhuma tabela encontrada na planilha XLSX.")
