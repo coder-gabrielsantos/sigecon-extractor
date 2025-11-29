@@ -9,8 +9,13 @@ CURRENCY_RX = re.compile(r"R\$\s*")
 SPACES_RX = re.compile(r"\s+")
 NON_DIGIT_RX = re.compile(r"[^\d]")  # usado no parse_int_flex
 
-# Cabeçalhos canônicos e aliases
-CANON_KEYS = ["ITEM", "DESCRIÇÃO", "UNID.", "QUANT.", "VALOR UNIT.", "VALOR TOTAL"]
+# Cabeçalhos canônicos:
+# - REQUIRED_KEYS: obrigatórios na planilha (se faltarem, erro)
+# - OPTIONAL_KEYS: opcionais; se existir, usamos, senão calculamos
+REQUIRED_KEYS = ["ITEM", "DESCRIÇÃO", "UNID.", "QUANT.", "VALOR UNIT."]
+OPTIONAL_KEYS = ["VALOR TOTAL"]
+ALL_KEYS = REQUIRED_KEYS + OPTIONAL_KEYS
+
 HEADER_ALIASES = {
     "ITEM": {"ITEM", "ITEN", "ITENS"},
     "DESCRIÇÃO": {
@@ -36,7 +41,7 @@ HEADER_ALIASES = {
         "VLR TOTAL",
         "TOTAL",
         "PREÇO TOTAL",
-        "V. TOTAL",   # usado na planilha
+        "V. TOTAL",
         "V TOTAL",
     },
 }
@@ -165,7 +170,7 @@ def parse_int_flex(value):
         return None
 
 
-def looks_like_total_row(row: List) -> bool:
+def looks_like_total_row(row: List[Any]) -> bool:
     joined = " ".join(normalize_text(c).upper() for c in row)
     return "VALOR TOTAL" in joined and parse_money(joined) is not None
 
@@ -176,7 +181,7 @@ def _header_match_score(cell, target_key: str) -> int:
     return int(any(alias in cell_u for alias in HEADER_ALIASES[target_key]))
 
 
-def _find_col_index(header_row: List, key: str):
+def _find_col_index(header_row: List[Any], key: str):
     for j, cell in enumerate(header_row):
         cell_u = normalize_text(cell).upper()
         for alias in HEADER_ALIASES[key]:
@@ -185,48 +190,57 @@ def _find_col_index(header_row: List, key: str):
     return None
 
 
-def detect_header_and_map(rows: List[List]) -> Tuple[int, Dict[str, int]]:
+def detect_header_and_map(rows: List[List[Any]]) -> Tuple[int, Dict[str, int]]:
+    """
+    Retorna (índice_da_linha_de_cabeçalho, col_map).
+    Exige somente as colunas de REQUIRED_KEYS.
+    """
     best_idx = -1
     best_score = -1
 
     for i, row in enumerate(rows):
         score = sum(
-            any(_header_match_score(c, key) for c in row) for key in CANON_KEYS
+            any(_header_match_score(c, key) for c in row) for key in ALL_KEYS
         )
         if score > best_score:
             best_score = score
             best_idx = i
 
-    if best_idx < 0 or best_score < 4:
+    if best_idx < 0 or best_score < 3:  # 3+ chaves já é bem forte
         raise ValueError("Cabeçalho da tabela não foi encontrado com confiança suficiente.")
 
     header_row = rows[best_idx]
 
     col_map: Dict[str, int] = {}
-    for key in CANON_KEYS:
+    # mapeia chaves obrigatórias + opcionais
+    for key in ALL_KEYS:
         idx = _find_col_index(header_row, key)
         if idx is not None:
             col_map[key] = idx
 
-    missing = [k for k in CANON_KEYS if k not in col_map]
-    if missing:
-        raise ValueError(f"Não foi possível mapear todas as colunas: faltam {missing}")
+    missing_required = [k for k in REQUIRED_KEYS if k not in col_map]
+    if missing_required:
+        raise ValueError(
+            f"Não foi possível mapear as colunas obrigatórias: faltam {missing_required}"
+        )
 
     return best_idx, col_map
 
 
 # -------------------- Parsing --------------------
-def parse_row_with_map(row: List, col_map: Dict[str, Any]) -> Dict[str, Any]:
+def parse_row_with_map(row: List[Any], col_map: Dict[str, int]) -> Dict[str, Any]:
     def get_raw(key: str):
-        idx = col_map[key]
-        return row[idx] if idx < len(row) else None
+        idx = col_map.get(key)
+        if idx is None or idx >= len(row):
+            return None
+        return row[idx]
 
     raw_item = get_raw("ITEM")
     raw_desc = get_raw("DESCRIÇÃO")
     raw_unid = get_raw("UNID.")
     raw_quant = get_raw("QUANT.")
     raw_vu = get_raw("VALOR UNIT.")
-    raw_vt = get_raw("VALOR TOTAL")
+    raw_vt = get_raw("VALOR TOTAL")  # pode ser None se coluna não existir
 
     item = parse_int_flex(raw_item)
     descricao = strip_valor_total_from_desc(normalize_text(raw_desc))
@@ -241,7 +255,7 @@ def parse_row_with_map(row: List, col_map: Dict[str, Any]) -> Dict[str, Any]:
         "unid": unid,
         "quant": quant,
         "valor_unit": valor_unit,
-        "valor_total": valor_total,
+        "valor_total": valor_total,  # será recalculado em validate_and_fix
     }
 
 
@@ -249,6 +263,7 @@ def validate_and_fix(rec: Dict[str, Any]):
     vu = rec.get("valor_unit")
     qt = rec.get("quant")
 
+    # Sempre recalcula valor_total a partir de quant * unit
     if vu is not None and qt is not None:
         rec["valor_total"] = round(vu * qt, 2)
 
@@ -256,9 +271,10 @@ def validate_and_fix(rec: Dict[str, Any]):
 
 
 def build_issues(rec: Dict[str, Any]):
+    # valor_total não é mais considerado "faltando", pois é calculado
     missing = [
         k
-        for k in ["item", "descricao", "unid", "quant", "valor_unit", "valor_total"]
+        for k in ["item", "descricao", "unid", "quant", "valor_unit"]
         if rec.get(k) in ("", None)
     ]
     if missing:
@@ -270,18 +286,18 @@ def build_issues(rec: Dict[str, Any]):
 
 
 # -------------------- Extração principal --------------------
-def _extract_from_all_rows(all_rows: List[List], empty_msg: str):
+def _extract_from_all_rows(all_rows: List[List[Any]], empty_msg: str):
     if not all_rows:
         return {"rows": [], "issues": [{"error": empty_msg}]}
 
     header_idx, col_map = detect_header_and_map(all_rows)
 
-    data_rows: List[List] = []
+    data_rows: List[List[Any]] = []
     for row in all_rows[header_idx + 1 :]:
         # pula linha vazia
         if not row or not any(normalize_text(c) for c in row):
             continue
-        # para na linha de totalização
+        # para na linha de totalização geral (se existir texto VALOR TOTAL em alguma linha)
         if looks_like_total_row(row):
             break
         data_rows.append(row)
@@ -315,7 +331,7 @@ def extract_table_from_xlsx(file_bytes: bytes):
 
     sheet = wb.active
 
-    all_rows: List[List] = []
+    all_rows: List[List[Any]] = []
     for row in sheet.iter_rows(values_only=True):
         raw_row = list(row)
         # normaliza para ver se é vazia, mas guarda tipos originais
