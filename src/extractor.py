@@ -7,7 +7,7 @@ from openpyxl import load_workbook
 # --- Regex auxiliares ---
 CURRENCY_RX = re.compile(r"R\$\s*")
 SPACES_RX = re.compile(r"\s+")
-NON_DIGIT_RX = re.compile(r"[^\d]")  # usado no novo parse_int_flex
+NON_DIGIT_RX = re.compile(r"[^\d]")  # usado no parse_int_flex
 
 # Cabeçalhos canônicos e aliases
 CANON_KEYS = ["ITEM", "DESCRIÇÃO", "UNID.", "QUANT.", "VALOR UNIT.", "VALOR TOTAL"]
@@ -28,7 +28,7 @@ HEADER_ALIASES = {
         "VLR UNIT.",
         "PREÇO UNIT.",
         "PREÇO UNIT",
-        "V. UNIT.",   # usado na planilha
+        "V. UNIT.",  # usado na planilha
         "V UNIT.",
     },
     "VALOR TOTAL": {
@@ -36,7 +36,7 @@ HEADER_ALIASES = {
         "VLR TOTAL",
         "TOTAL",
         "PREÇO TOTAL",
-        "V. TOTAL",   # usado na planilha
+        "V. TOTAL",  # usado na planilha
         "V TOTAL",
     },
 }
@@ -82,33 +82,51 @@ def normalize_text(s: str) -> str:
 
 
 def parse_money(s: str):
+    """
+    Converte valores monetários em float, aceitando:
+    - 'R$ 2.277,92'
+    - '2277,92'
+    - '49.52'
+    """
     if not s:
         return None
+
     s = normalize_text(s)
-    if s.upper() == "R$":
+    s = CURRENCY_RX.sub("", s).strip()
+
+    # mantém apenas dígitos, ponto, vírgula e sinal
+    allowed = set("0123456789-.,")
+    s = "".join(ch for ch in s if ch in allowed)
+
+    if not s or s in {".", ",", "-", "-.", "-,"}:
         return None
-    s = CURRENCY_RX.sub("", s)
-    s = s.replace(".", "")
-    s = s.replace(",", ".")
+
+    if "," in s and "." in s:
+        # formato BR: . milhar, , decimal -> remove pontos de milhar
+        s = s.replace(".", "")
+        s = s.replace(",", ".")
+    elif "," in s:
+        # só vírgula: assume vírgula como decimal e ponto (se houver) como milhar
+        s = s.replace(".", "")
+        s = s.replace(",", ".")
+    else:
+        # só ponto ou nenhum separador: assume ponto decimal (não mexe)
+        pass
+
     try:
         return float(s)
     except ValueError:
         return None
 
 
-# 🔥 NOVA FUNÇÃO FLEXÍVEL PARA NÚMEROS (Item e Quant)
+# 🔥 função flexível para inteiros (item e quant)
 def parse_int_flex(s: str):
     if not s:
         return None
-
     s = normalize_text(s)
-
-    # remove tudo que não for dígito (exceto dígitos)
     only_digits = NON_DIGIT_RX.sub("", s)
-
     if not only_digits:
         return None
-
     try:
         return int(only_digits)
     except ValueError:
@@ -152,7 +170,7 @@ def detect_header_and_map(rows: List[List[str]]) -> Tuple[int, Dict[str, int]]:
 
     header_row = rows[best_idx]
 
-    col_map = {}
+    col_map: Dict[str, int] = {}
     for key in CANON_KEYS:
         idx = _find_col_index(header_row, key)
         if idx is not None:
@@ -167,8 +185,7 @@ def detect_header_and_map(rows: List[List[str]]) -> Tuple[int, Dict[str, int]]:
 
 # -------------------- Parsing --------------------
 def parse_row_with_map(row: List[str], col_map: Dict[str, Any]) -> Dict[str, Any]:
-
-    def get(key):
+    def get(key: str) -> str:
         idx = col_map[key]
         if idx < len(row):
             return normalize_text(row[idx])
@@ -223,7 +240,7 @@ def _extract_from_all_rows(all_rows: List[List[str]], empty_msg: str):
 
     header_idx, col_map = detect_header_and_map(all_rows)
 
-    data_rows = []
+    data_rows: List[List[str]] = []
     for row in all_rows[header_idx + 1:]:
         if not row or not any(normalize_text(c) for c in row):
             continue
@@ -231,12 +248,11 @@ def _extract_from_all_rows(all_rows: List[List[str]], empty_msg: str):
             break
         data_rows.append(row)
 
-    records = []
-    issues = []
+    records: List[Dict[str, Any]] = []
+    issues: List[Dict[str, Any]] = []
 
     for row in data_rows:
-        safe_row = list(row)
-        rec = parse_row_with_map(safe_row, col_map)
+        rec = parse_row_with_map(list(row), col_map)
         rec = validate_and_fix(rec)
 
         issue = build_issues(rec)
@@ -245,7 +261,7 @@ def _extract_from_all_rows(all_rows: List[List[str]], empty_msg: str):
 
         records.append(rec)
 
-    records.sort(key=lambda r: (r["item"] if r["item"] is not None else 10**9))
+    records.sort(key=lambda r: (r["item"] if r["item"] is not None else 10 ** 9))
 
     return {"rows": records, "issues": issues}
 
@@ -261,7 +277,7 @@ def extract_table_from_xlsx(file_bytes: bytes):
 
     sheet = wb.active
 
-    all_rows = []
+    all_rows: List[List[str]] = []
     for row in sheet.iter_rows(values_only=True):
         raw = ["" if c is None else str(c) for c in row]
         norm = [normalize_text(c) for c in raw]
